@@ -1,0 +1,22 @@
+Total samples: 1319
+
+format_reward:
+  Mean:   0.3723
+  Median: 0.0000
+  Std:    0.4834
+  Min:    0.0000
+  Max:    1.0000
+
+answer_reward:
+  Mean:   0.0243
+  Median: 0.0000
+  Std:    0.1539
+  Min:    0.0000
+  Max:    1.0000
+
+reward:
+  Mean:   0.0243
+  Median: 0.0000
+  Std:    0.1539
+  Min:    0.0000
+  Max:    1.0000
