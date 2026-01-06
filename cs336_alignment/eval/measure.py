@@ -1,17 +1,26 @@
 from vllm import LLM, SamplingParams
 from datasets import Dataset
 from cs336_alignment.data_utils import load_gsm8k
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from cs336_alignment.eval.drgrpo_grader import r1_zero_reward_fn
 
 from typing import Callable
 import re
+
+default_sampling_params = SamplingParams(
+    temperature=1.0, 
+    top_p=1.0, 
+    max_tokens=1024, 
+    stop=["</answer>"], 
+    include_stop_str_in_output=True, 
+    logprobs=20 # set to 20 to approximate token entropy
+)
     
 def evaluate_vllm(
     llm: LLM, 
     reward_fn: Callable[[str, str], dict[str, float]], 
     prompts: list[str],
     answers: list[str],
-    eval_sampling_params: SamplingParams 
+    eval_sampling_params: SamplingParams = default_sampling_params
 ) -> list[dict]:
 
     """ 
@@ -35,46 +44,26 @@ def evaluate_vllm(
         rets.append(ret)
     return rets
 
-
-def get_prompt_answer_pair(prompt_template: str, dataset: Dataset) -> tuple[list[str], list[str]]:
-    prompts = []
-    answers = []
-    for record in dataset:
-        prompt = prompt_template.replace("{question}", record["question"])
-        prompts.append(prompt)
-        answers.append(record["answer"])
-    return prompts, answers
-
-def print_reward_statistics(outputs: list[dict]):
+def get_reward_statistics(outputs: list[dict]) -> dict[str, dict[str, float]]:
     """
     Compute and print statistics for each reward type in the evaluation outputs.
 
     Args:
         outputs: List of evaluation results, each containing reward metrics
+
+    Return:
+        statistics for each reward type
     """
     import numpy as np
 
     reward_types = ["format_reward", "answer_reward", "reward"]
 
-    print("\n=== Evaluation Results ===")
-    print(f"Total samples: {len(outputs)}\n")
-
+    ret = {}
     for reward_type in reward_types:
         values = [output[reward_type] for output in outputs]
-
-        mean_val = np.mean(values)
-        median_val = np.median(values)
-        std_val = np.std(values)
-        min_val = np.min(values)
-        max_val = np.max(values)
-
-        print(f"{reward_type}:")
-        print(f"  Mean:   {mean_val:.4f}")
-        print(f"  Median: {median_val:.4f}")
-        print(f"  Std:    {std_val:.4f}")
-        print(f"  Min:    {min_val:.4f}")
-        print(f"  Max:    {max_val:.4f}")
-        print()
+        ret[reward_type] = np.mean(values)
+        
+    return ret
 
 def main():
     import argparse
@@ -109,11 +98,7 @@ def main():
 
     llm = LLM(model=args.model_name)
 
-    with open(args.prompt_path) as f:
-        prompt_template = f.read()
-
-    dataset = load_gsm8k()
-    prompts, answers = get_prompt_answer_pair(prompt_template, dataset["test"])
+    prompts, answers = load_gsm8k(args.prompt_path, "eval")
 
     outputs = evaluate_vllm(
         llm,
@@ -129,7 +114,17 @@ def main():
             f.write(json.dumps(output) + "\n")
 
     # Print reward statistics
-    print_reward_statistics(outputs)
+    stats = get_reward_statistics(outputs)
+    print("\n=== Evaluation Results ===")
+    print(f"Total samples: {len(outputs)}\n")
+    for reward_type in stats:
+        print(f"{reward_type}:")
+        print(f"  Mean:   {stats[reward_type]:.4f}")
+        print()
 
+"""
+command
+uv run python -m cs336_alignment.eval.measure --model_name Qwen/Qwen2-Math-1.5B --prompt_path cs336_alignment/prompts/r1_zero.prompt --output_path result/gsm8k_qwen_baseline.json
+"""
 if __name__ == "__main__":
     main()
