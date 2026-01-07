@@ -82,12 +82,12 @@ def main():
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=1,
+        default=3,
     )
     parser.add_argument(
         "--num_epochs",
         type=int,
-        default=10,
+        default=3,
     )
     parser.add_argument(
         "--learning_rate",
@@ -126,7 +126,17 @@ def main():
     eval_prompts, eval_responses = load_gsm8k(args.prompt_path, "eval")
 
     wandb.login(host=os.environ["WANDB_ENDPOINT"])
-    with wandb.init(project="alignment-test", name="sft-"+str(uuid.uuid1()), mode="disabled") as run:
+    with wandb.init(
+        project="alignment-test",
+        name="sft-"+str(uuid.uuid1())[:6],
+        config={
+            "model_name": args.model_name,
+            "batch_size": args.batch_size,
+            "num_epochs": args.num_epochs,
+            "learning_rate": args.learning_rate,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        }
+    ) as run:
         run.define_metric("train/*", step_metric="global_step")
         run.define_metric("eval/*", step_metric="epoch")
         global_step = 0
@@ -162,7 +172,18 @@ def main():
             )
             stats = get_reward_statistics(outputs)
 
-            run.log(stats | {"epoch": epoch})
+            log_stats = {"epoch": epoch}
+            for k in stats:
+                log_stats["eval/"+k] = stats[k]
+            run.log(log_stats)
+
+            path = os.path.join(args.output_dir, str(epoch))
+            os.makedirs(path, exist_ok=True)
+            model.save_pretrained(path)
+            import json
+            with open(os.path.join(path, "eval.jsonl"), "w") as f:
+                for output in outputs:
+                    f.write(json.dumps(output) + "\n")
 
 if __name__ == "__main__":
     main()

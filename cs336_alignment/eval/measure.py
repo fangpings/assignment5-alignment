@@ -5,16 +5,39 @@ from cs336_alignment.eval.drgrpo_grader import r1_zero_reward_fn
 
 from typing import Callable
 import re
+import numpy as np
 
 default_sampling_params = SamplingParams(
-    temperature=1.0, 
-    top_p=1.0, 
-    max_tokens=1024, 
-    stop=["</answer>"], 
-    include_stop_str_in_output=True, 
+    temperature=1.0,
+    top_p=1.0,
+    max_tokens=1024,
+    stop=["</answer>"],
+    include_stop_str_in_output=True,
     logprobs=20 # set to 20 to approximate token entropy
 )
-    
+
+def calculate_avg_token_entropy(logprobs) -> float:
+    """
+    Calculate average token entropy from logprobs.
+
+    Args:
+        logprobs: List of token logprobs from vllm output
+
+    Returns:
+        Average entropy across all tokens in bits
+    """
+    token_entropies = []
+    if logprobs:
+        for token_logprobs in logprobs:
+            if token_logprobs:
+                # Calculate entropy: -sum(p * log(p))
+                logprob_values = np.array([lp.logprob for lp in token_logprobs.values()])
+                probs = np.exp(logprob_values)
+                entropy = -np.sum(probs * logprob_values)
+                token_entropies.append(entropy)
+
+    return np.mean(token_entropies) if token_entropies else 0.0
+
 def evaluate_vllm(
     llm: LLM, 
     reward_fn: Callable[[str, str], dict[str, float]], 
@@ -36,10 +59,15 @@ def evaluate_vllm(
         generated_text = output.outputs[0].text
         prompt = output.prompt
         reward = reward_fn(generated_text, expected_answer)
+
+        # Calculate average token entropy from logprobs
+        avg_entropy = calculate_avg_token_entropy(output.outputs[0].logprobs)
+
         ret = {
             "question": prompt,
             "generated_text": generated_text,
-            "expected_answer": expected_answer
+            "expected_answer": expected_answer,
+            "avg_token_entropy": avg_entropy
         } | reward
         rets.append(ret)
     return rets
@@ -56,7 +84,7 @@ def get_reward_statistics(outputs: list[dict]) -> dict[str, dict[str, float]]:
     """
     import numpy as np
 
-    reward_types = ["format_reward", "answer_reward", "reward"]
+    reward_types = ["format_reward", "answer_reward", "reward", "avg_token_entropy"]
 
     ret = {}
     for reward_type in reward_types:
