@@ -1,6 +1,9 @@
-from cs336_alignment.utils import (
-    masked_normalize, 
+from cs336_alignment.sft.utils import (
+    masked_normalize,
     get_response_log_probs,
+    sft_microbatch_train_step
+)
+from cs336_alignment.utils import (
     init_vllm,
     load_policy_into_vllm_instance,
     set_seed
@@ -19,44 +22,6 @@ from tqdm import tqdm
 
 import os
 import uuid
-
-def sft_microbatch_train_step(
-    policy_log_probs: torch.Tensor,
-    response_mask: torch.Tensor, 
-    gradient_accumulation_steps: int, 
-    normalize_constant: float = 1.0, 
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """
-    Execute a forward-and-backward pass on a microbatch.
-
-    Args:
-
-        policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the SFT policy being trained.
-        response_mask (batch_size, sequence_length), 1 for response tokens, 0 for prompt/padding.
-        gradient_accumulation_steps Number of microbatches per optimizer step. 
-        normalize_constant The constant by which to divide the sum. It is fine to leave this as 1.0.
-
-    Returns:
-
-        tuple[torch.Tensor, dict[str, torch.Tensor]].
-            loss scalar tensor. The microbatch loss, adjusted for gradient accumulation. We return this so we can log it.
-            metadata Dict with metadata from the underlying loss call, and any other statistics you might want to log.
-    """
-
-    # so here policy_log_probs should be the output from get_response_log_probs
-    # which is just the cross entropy loss (without a minus sign)
-    # 
-    # QUESTION: I cannot understand the right answer here. It's basically summing within a training sample
-    # then taking average across batch. why is it correct? if it is correct then longer samples will have more contribution to the loss?
-    loss = -masked_normalize(policy_log_probs, response_mask, dim=-1, normalize_constant=normalize_constant)
-    loss = loss.mean()
-
-    # gradient accumulation requires you to 1. divide the gradient by accumulation steps 2. do loss.backward() every step
-    # 3. run optimizer.step() every accumulation steps
-    loss /= gradient_accumulation_steps
-    loss.backward()
-
-    return (loss.detach(), {})
 
 def main():
     import argparse

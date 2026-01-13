@@ -1,6 +1,7 @@
-from datasets import load_dataset, DatasetDict
+from datasets import load_dataset
+from transformers import PreTrainedTokenizer
+import torch
 
-from cs336_alignment.utils import tokenize_prompt_and_output
 from torch.utils.data import Dataset
 
 def load_gsm8k(prompt_template_path: str, mode: str):
@@ -69,3 +70,48 @@ class SftDataset(Dataset):
             "prompt": self.prompts[idx],
             "response": self.responses[idx]
         }
+
+def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer: PreTrainedTokenizer) -> dict[str, torch.Tensor]:
+    """
+    Tokenize the prompt and output strings, and construct a mask that is 1 for the response tokens and 0 for other tokens (prompt or padding).
+    Args:
+
+    prompt_strs: list[str] List of prompt strings. 
+    output_strs: list[str] List of output strings.
+    tokenizer: PreTrainedTokenizer Tokenizer to use for tokenization.
+
+    Returns:
+
+    dict[str, torch.Tensor]. 
+    Let prompt_and_output_lens be a list containing the lengths of the tokenized prompt and output strings. Then the returned dictionary should have the following keys:
+        input_ids torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+            the tokenized prompt and output strings, with the final token sliced off.
+
+        labels torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+            shifted input ids, i.e., the input ids without the first token.
+
+        response_mask torch.Tensor of shape (batch_size, max(prompt_and_output_lens) -1): 
+            a mask on the response tokens in the labels.
+    """
+    prompt_input_ids = tokenizer(prompt_strs)["input_ids"]
+    output_input_ids = tokenizer(output_strs)["input_ids"]
+    input_ids = [a + b for a, b in zip(prompt_input_ids, output_input_ids)]
+    max_length = max([len(x) for x in input_ids])
+    input_ids_padded = []
+    for input_id in input_ids:
+        input_id_padded = input_id + [tokenizer.pad_token_id] * (max_length - len(input_id))
+        input_ids_padded.append(input_id_padded)
+    input_ids_padded = torch.tensor(input_ids_padded)
+    
+    response_masks = torch.zeros_like(input_ids_padded, dtype=torch.bool)
+    for i in range(len(response_masks)):
+        p_len = len(prompt_input_ids[i])
+        o_len = len(output_input_ids[i])
+        response_masks[i, p_len:p_len+o_len] = True
+        
+    
+    return {
+        "input_ids": input_ids_padded[:, :-1],
+        "labels": input_ids_padded[:, 1:],
+        "response_mask": response_masks[:, 1:]
+    }

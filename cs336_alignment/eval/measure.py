@@ -1,4 +1,10 @@
-from vllm import LLM, SamplingParams
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+    LLM = None
+    SamplingParams = None
 from datasets import Dataset
 from cs336_alignment.data_utils import load_gsm8k
 from cs336_alignment.eval.drgrpo_grader import r1_zero_reward_fn
@@ -7,14 +13,17 @@ from typing import Callable
 import re
 import numpy as np
 
-default_sampling_params = SamplingParams(
-    temperature=1.0,
-    top_p=1.0,
-    max_tokens=1024,
-    stop=["</answer>"],
-    include_stop_str_in_output=True,
-    logprobs=20 # set to 20 to approximate token entropy
-)
+if VLLM_AVAILABLE:
+    default_sampling_params = SamplingParams(
+        temperature=1.0,
+        top_p=1.0,
+        max_tokens=1024,
+        stop=["</answer>"],
+        include_stop_str_in_output=True,
+        logprobs=20 # set to 20 to approximate token entropy
+    )
+else:
+    default_sampling_params = None
 
 def calculate_avg_token_entropy(logprobs) -> float:
     """
@@ -39,11 +48,11 @@ def calculate_avg_token_entropy(logprobs) -> float:
     return np.mean(token_entropies) if token_entropies else 0.0
 
 def evaluate_vllm(
-    llm: LLM, 
-    reward_fn: Callable[[str, str], dict[str, float]], 
+    llm,
+    reward_fn: Callable[[str, str], dict[str, float]],
     prompts: list[str],
     answers: list[str],
-    eval_sampling_params: SamplingParams = default_sampling_params
+    eval_sampling_params = default_sampling_params
 ) -> list[dict]:
 
     """ 
@@ -119,6 +128,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if not VLLM_AVAILABLE:
+        raise ImportError("vllm is not available. This script requires vllm to run.")
 
     default_sampling_params = SamplingParams(
         temperature=1.0, top_p=1.0, max_tokens=1024, stop=["</answer>"], include_stop_str_in_output=True
