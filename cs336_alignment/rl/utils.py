@@ -1,5 +1,174 @@
 import torch
 from typing import Callable, Any, Literal
+from dataclasses import dataclass
+import argparse
+
+@dataclass
+class GRPOConfig:
+    """
+    Configuration parameters for Group Relative Policy Optimization (GRPO) training.
+    """
+    # Model and data paths
+    model_name: str = "Qwen/Qwen2.5-Math-1.5B"
+    prompt_path: str = "cs336_alignment/prompts/r1_zero.prompt"
+    output_dir: str = "outputs"
+
+    # Training Loop
+    # Total number of rollout-train cycles. This is the outer loop of GRPO
+    n_grpo_steps: int = 200
+    learning_rate: float = 1e-5
+    # How many times to train on the same rollout data before collecting fresh samples.
+    # 1 = on-policy: Generate data → train once → discard → repeat
+    # >1 = off-policy: Generate data → train multiple epochs → discard → repeat
+    epochs_per_rollout_batch: int = 1  # On-policy training
+
+    # Reward & Advantage
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline"
+    advantage_eps: float = 1e-6
+    use_std_normalization: bool = True
+    clip_range: float = 0.2
+
+    # Rollout & Sampling
+    # Number of samples generated per GRPO step. With group_size=8, this means 256÷8 = 32 unique prompts, each getting 8 responses.
+    rollout_batch_size: int = 256
+    group_size: int = 8  # Number of responses per prompt
+    sampling_temperature: float = 1.0
+    sampling_min_tokens: int = 4  # Disallow empty/near-empty responses
+    sampling_max_tokens: int = 1024
+
+    # Hardware & Optimization
+    # Batch size for gradient updates during the training phase. Can be same as rollout_batch_size or different depending on memory constraints.
+    train_batch_size: int = 256  # On-policy: usually matches rollout_batch_size
+    gradient_accumulation_steps: int = 128  # Microbatch size = 2; tuned for H100 memory
+
+def parse_grpo_args() -> GRPOConfig:
+    """
+    Parse command-line arguments and return a GRPOConfig instance.
+
+    Returns:
+        GRPOConfig: Configuration object with all training parameters.
+    """
+    parser = argparse.ArgumentParser(
+        description="Train a language model using Group Relative Policy Optimization (GRPO)"
+    )
+    # Model and data paths
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="Qwen/Qwen2.5-Math-1.5B"
+    )
+    parser.add_argument(
+        "--prompt_path",
+        type=str,
+        default="cs336_alignment/prompts/r1_zero.prompt"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs"
+    )
+
+    # Training Loop
+    parser.add_argument(
+        "--n_grpo_steps",
+        type=int,
+        default=200
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5
+    )
+    parser.add_argument(
+        "--epochs_per_rollout_batch",
+        type=int,
+        default=1
+    )
+
+    # Reward & Advantage
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+        default="reinforce_with_baseline"
+    )
+    parser.add_argument(
+        "--advantage_eps",
+        type=float,
+        default=1e-6
+    )
+    parser.add_argument(
+        "--use_std_normalization",
+        type=lambda x: x.lower() == 'true',
+        default=True
+    )
+    parser.add_argument(
+        "--clip_range",
+        type=float,
+        default=0.2
+    )
+
+    # Rollout & Sampling
+    parser.add_argument(
+        "--rollout_batch_size",
+        type=int,
+        default=256
+    )
+    parser.add_argument(
+        "--group_size",
+        type=int,
+        default=8
+    )
+    parser.add_argument(
+        "--sampling_temperature",
+        type=float,
+        default=1.0
+    )
+    parser.add_argument(
+        "--sampling_min_tokens",
+        type=int,
+        default=4
+    )
+    parser.add_argument(
+        "--sampling_max_tokens",
+        type=int,
+        default=1024
+    )
+
+    # Hardware & Optimization
+    parser.add_argument(
+        "--train_batch_size",
+        type=int,
+        default=256
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=128
+    )
+
+    args = parser.parse_args()
+
+    # Create GRPOConfig from parsed args
+    return GRPOConfig(
+        model_name=args.model_name,
+        prompt_path=args.prompt_path,
+        output_dir=args.output_dir,
+        n_grpo_steps=args.n_grpo_steps,
+        learning_rate=args.learning_rate,
+        epochs_per_rollout_batch=args.epochs_per_rollout_batch,
+        loss_type=args.loss_type,
+        advantage_eps=args.advantage_eps,
+        use_std_normalization=args.use_std_normalization,
+        clip_range=args.clip_range,
+        rollout_batch_size=args.rollout_batch_size,
+        group_size=args.group_size,
+        sampling_temperature=args.sampling_temperature,
+        sampling_min_tokens=args.sampling_min_tokens,
+        sampling_max_tokens=args.sampling_max_tokens,
+        train_batch_size=args.train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps
+    )
 
 def compute_group_normalized_rewards(
     reward_fn: Callable[[str, str], dict[str, float]],

@@ -1,0 +1,160 @@
+from cs336_alignment.sft.utils import (
+    masked_normalize,
+    get_response_log_probs,
+    sft_microbatch_train_step
+)
+from cs336_alignment.utils import (
+    init_vllm,
+    load_policy_into_vllm_instance,
+    set_seed
+)
+from cs336_alignment.rl.utils import GRPOConfig, parse_grpo_args, compute_group_normalized_rewards, grpo_microbatch_train_step
+from cs336_alignment.data_utils import load_gsm8k, SftDataset, get_collate_fn_sft, tokenize_prompt_and_output
+from cs336_alignment.eval.drgrpo_grader import r1_zero_reward_fn
+from cs336_alignment.eval.measure import evaluate_vllm, get_reward_statistics
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+
+from vllm import LLM, SamplingParams
+
+import wandb
+from tqdm import tqdm
+
+import os
+import uuid
+from dataclasses import asdict
+
+def main():
+    set_seed()
+
+    grpo_config = parse_grpo_args()
+
+    policy_device = "cuda:0"
+    rollout_device = "cuda:1"
+
+    policy = AutoModelForCausalLM.from_pretrained(grpo_config.model_name).to(policy_device)
+    tokenizer = AutoTokenizer.from_pretrained(grpo_config.model_name)
+
+    optimizer = AdamW(policy.parameters(), lr=grpo_config.learning_rate, weight_decay=0.0, betas=(0.9, 0.95))
+
+    default_sampling_params = SamplingParams(
+        temperature=grpo_config.sampling_temperature,
+        min_tokens=grpo_config.sampling_min_tokens,
+        max_tokens=grpo_config.sampling_max_tokens,
+        stop=["</answer>"],
+        include_stop_str_in_output=True,
+        logprobs=1
+    )
+    llm = init_vllm(grpo_config.model_name, rollout_device)
+
+    train_prompts, train_responses = load_gsm8k(grpo_config.prompt_path, split="train", answer_only=False)
+    rollout_dataset = SftDataset(train_prompts, train_responses)
+    rollout_dataloader = DataLoader(
+        rollout_dataset,
+        batch_size=grpo_config.rollout_batch_size // grpo_config.group_size, # since grpo has groups and each group has same prompt
+        shuffle=True,
+        collate_fn=get_collate_fn_sft(tokenizer),
+        num_workers=4
+    )
+
+    eval_prompts, eval_responses = load_gsm8k(grpo_config.prompt_path, split="test", answer_only=True)
+
+    wandb.login(host=os.environ["WANDB_ENDPOINT"])
+    with wandb.init(
+        project="alignment-test",
+        name="grpo-"+str(uuid.uuid1())[:6],
+        config=asdict(grpo_config),
+        mode="disabled"
+    ) as run:
+        run.define_metric("train/*", step_metric="global_step")
+        run.define_metric("eval/*", step_metric="epoch")
+
+        dataloader_iter = iter(rollout_dataloader)
+        for global_step in tqdm(range(grpo_config.n_grpo_steps)):
+            # Roll out phase
+            try:
+                batch = next(dataloader_iter)
+            except StopIteration:
+                # Restart the dataloader when exhausted
+                dataloader_iter = iter(rollout_dataloader)
+                batch = next(dataloader_iter)
+            grouped_prompts = [x for x in batch["raw_prompts"] for _ in range(grpo_config.group_size)]
+            grouped_answers = [x for x in batch["raw_responses"] for _ in range(grpo_config.group_size)] # it only contains final answer
+
+            outputs = llm.generate(grouped_prompts, default_sampling_params)
+            responses = [x.outputs[0].text for x in outputs]
+            old_log_probs = [[list(y.values())[0].logprob for y in x.outputs[0].logprobs] for x in outputs]
+            max_length = max([len(x) for x in old_log_probs])
+            old_log_probs = [x + [0] * (max_length - len(x)) for x in old_log_probs] # it's various length, so we need to pad it
+
+            advantages, raw_rewards, metadata = compute_group_normalized_rewards(
+                r1_zero_reward_fn,
+                responses,
+                grouped_answers,
+                grpo_config.group_size,
+                normalize_by_std=grpo_config.use_std_normalization
+            )
+
+            # Train phase
+            #
+            # train dataset is takes in rollout batch every time
+            train_dataset = SftDataset(grouped_prompts, responses, raw_rewards=raw_rewards, advantages=advantages)
+            train_dataloader = DataLoader(
+                train_dataset,
+                batch_size=grpo_config.train_batch_size // grpo_config.gradient_accumulation_steps, # since grpo has groups and each group has same prompt
+                shuffle=True,
+                collate_fn=get_collate_fn_sft(tokenizer),
+                num_workers=4
+            )
+            for _ in range(grpo_config.epochs_per_rollout_batch):
+                for idx, batch in enumerate(train_dataloader):
+                    # Here we concat the input prompt and the reference generated response
+                    # to create the logprob for each token using the policy model
+                    # Note this means at each position, the token is generated by the policy model that we need to update
+                    # but is based on the previous tokens generated by the reference model (called teacher forcing)
+                    input_ids = batch["input_ids"].to(policy_device)
+                    labels = batch["labels"].to(policy_device)
+                    response_mask = batch["response_mask"].to(policy_device)
+                    batch_raw_rewards = batch["raw_rewards"].to(policy_device).unsqueeze(-1)
+                    batch_advantages = batch["advantages"].to(policy_device).unsqueeze(-1)
+
+                    log_probs_dict = get_response_log_probs(policy, input_ids, labels, return_token_entropy=True)
+                    log_probs = log_probs_dict["log_probs"]
+                    entropy = log_probs_dict["token_entropy"]
+
+                    loss, _ = grpo_microbatch_train_step(
+                        log_probs, 
+                        response_mask, 
+                        grpo_config.gradient_accumulation_steps,
+                        grpo_config.loss_type,
+                        batch_raw_rewards,
+                        batch_advantages,
+                        old_log_probs,
+                        grpo_config.clip_range
+                    )
+
+                    if (idx + 1) % grpo_config.gradient_accumulation_steps == 0:
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        run.log({"train/loss": loss.item(), "train/entropy": entropy.mean().detach().item(), "global_step": global_step})
+                            
+            # run rollout after every epoch
+            load_policy_into_vllm_instance(policy, llm)
+            outputs = evaluate_vllm(
+                llm,
+                reward_fn=r1_zero_reward_fn,
+                prompts=eval_prompts,
+                answers=eval_responses
+            )
+            stats = get_reward_statistics(outputs)
+
+            log_stats = {"epoch": global_step}
+            for k in stats:
+                log_stats["eval/"+k] = stats[k]
+            run.log(log_stats)
+
+if __name__ == "__main__":
+    main()

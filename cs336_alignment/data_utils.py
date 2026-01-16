@@ -4,26 +4,28 @@ import torch
 
 from torch.utils.data import Dataset
 
-def load_gsm8k(prompt_template_path: str, mode: str):
+def load_gsm8k(prompt_template_path: str, split: str, answer_only: bool):
     """
     Load gsm8k dataset for train & test. Original dataset has 2 columns
     * question
     * answer: it contains solution steps & answer, separated by ####
 
+    Args:
+        prompt_template_path: Path to the prompt template file
+        split: Dataset split to load, either "train" or "test"
+        answer_only: If True, returns answer only; if False, returns solution with answer
+
     Returns
         tuple[list[str], list[str]]
 
         * first item is the list of formatted prompt
-        * second item, if mode is eval, then returns answer only, otherwise returns solution with answer
+        * second item, if answer_only is True, then returns answer only, otherwise returns solution with answer
     """
     with open(prompt_template_path) as f:
         prompt_template = f.read()
-    
+
     dataset = load_dataset("gsm8k", "main")
-    if mode == "eval":
-        dataset = dataset["test"]
-    else:
-        dataset = dataset["train"]
+    dataset = dataset[split]
 
     prompts = []
     answers = []
@@ -33,14 +35,14 @@ def load_gsm8k(prompt_template_path: str, mode: str):
         solution = parts[0].strip() if len(parts) > 0 else ""
         answer = parts[1].strip() if len(parts) > 1 else ""
         question = prompt_template.replace("{question}", example["question"])
-    
+
         prompts.append(question)
-        if mode != "eval":
+        if answer_only:
+            answers.append(answer)
+        else:
             formatted_solution = f"{solution} </think> <answer> {answer} </answer>"
             answers.append(formatted_solution)
-        else:
-            answers.append(answer)
-    
+
     return prompts, answers
 
 def get_collate_fn_sft(tokenizer):
@@ -53,23 +55,38 @@ def get_collate_fn_sft(tokenizer):
         tokenized["raw_prompts"] = prompts
         tokenized["raw_responses"] = responses
 
+        if "raw_rewards" in batch[0]:
+            raw_rewards = torch.tensor([item["raw_rewards"] for item in batch])
+            tokenized["raw_rewards"] = raw_rewards
+        if "advantages" in batch[0]:
+            advantages = torch.tensor([item["advantages"] for item in batch])
+            tokenized["advantages"] = advantages
+
         return tokenized
     return collate_fn_sft
 
+# TODO no longer SFT dataset anymore
 class SftDataset(Dataset):
-    def __init__(self, prompts, responses):
+    def __init__(self, prompts, responses, raw_rewards=None, advantages=None):
         self.prompts = prompts
         self.responses = responses
+        self.raw_rewards = raw_rewards
+        self.advantages = advantages
 
     def __len__(self):
         return len(self.prompts)
 
     def __getitem__(self, idx):
         # Return raw strings - tokenization happens in collate_fn
-        return {
+        ret = {
             "prompt": self.prompts[idx],
-            "response": self.responses[idx]
+            "response": self.responses[idx],
         }
+        if self.raw_rewards != None:
+            ret = ret | {"raw_rewards": self.raw_rewards[idx]}
+        if self.advantages != None:
+            ret = ret | {"advantages": self.advantages[idx]}
+        return ret
 
 def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer: PreTrainedTokenizer) -> dict[str, torch.Tensor]:
     """

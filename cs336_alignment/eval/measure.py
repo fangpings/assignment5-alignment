@@ -62,6 +62,7 @@ def evaluate_vllm(
     Return value: a dict of question, generated_answer, expected_answer, format_reward, answer_reward, reward
     """
 
+    # For reference, output struct: https://github.com/vllm-project/vllm/blob/8ef50d9a6b91b7800e69a846219069a29a0298a4/vllm/outputs.py#L86
     outputs = llm.generate(prompts, eval_sampling_params)
     rets = []
     for output, expected_answer in zip(outputs, answers):
@@ -138,7 +139,7 @@ def main():
 
     llm = LLM(model=args.model_name)
 
-    prompts, answers = load_gsm8k(args.prompt_path, "eval")
+    prompts, answers = load_gsm8k(args.prompt_path, split="test", answer_only=True)
 
     outputs = evaluate_vllm(
         llm,
