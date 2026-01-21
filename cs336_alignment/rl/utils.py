@@ -16,6 +16,7 @@ class GRPOConfig:
     # Training Loop
     # Total number of rollout-train cycles. This is the outer loop of GRPO
     n_grpo_steps: int = 200
+    eval_steps: int = 10
     learning_rate: float = 1e-5
     # How many times to train on the same rollout data before collecting fresh samples.
     # 1 = on-policy: Generate data → train once → discard → repeat
@@ -40,6 +41,22 @@ class GRPOConfig:
     # Batch size for gradient updates during the training phase. Can be same as rollout_batch_size or different depending on memory constraints.
     train_batch_size: int = 256  # On-policy: usually matches rollout_batch_size
     gradient_accumulation_steps: int = 128  # Microbatch size = 2; tuned for H100 memory
+
+    def __post_init__(self):
+        assert self.train_batch_size % self.gradient_accumulation_steps == 0, (
+            "train_batch_size must be divisible by gradient_accumulation_steps"
+        )
+        self.micro_train_batch_size = self.train_batch_size // self.gradient_accumulation_steps
+
+        assert self.rollout_batch_size % self.group_size == 0, (
+            "rollout_batch_size must be divisible by group_size"
+        )
+        self.n_prompts_per_rollout_batch = self.rollout_batch_size // self.group_size
+
+        assert self.train_batch_size >= self.group_size, (
+            "train_batch_size must be greater than or equal to group_size"
+        )
+        self.n_microbatches_per_rollout_batch = self.rollout_batch_size // self.micro_train_batch_size
 
 def parse_grpo_args() -> GRPOConfig:
     """
@@ -73,6 +90,11 @@ def parse_grpo_args() -> GRPOConfig:
         "--n_grpo_steps",
         type=int,
         default=200
+    )
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=10
     )
     parser.add_argument(
         "--learning_rate",
@@ -155,6 +177,7 @@ def parse_grpo_args() -> GRPOConfig:
         prompt_path=args.prompt_path,
         output_dir=args.output_dir,
         n_grpo_steps=args.n_grpo_steps,
+        eval_steps=args.eval_steps,
         learning_rate=args.learning_rate,
         epochs_per_rollout_batch=args.epochs_per_rollout_batch,
         loss_type=args.loss_type,

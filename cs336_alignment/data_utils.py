@@ -55,23 +55,13 @@ def get_collate_fn_sft(tokenizer):
         tokenized["raw_prompts"] = prompts
         tokenized["raw_responses"] = responses
 
-        if "raw_rewards" in batch[0]:
-            raw_rewards = torch.tensor([item["raw_rewards"] for item in batch])
-            tokenized["raw_rewards"] = raw_rewards
-        if "advantages" in batch[0]:
-            advantages = torch.tensor([item["advantages"] for item in batch])
-            tokenized["advantages"] = advantages
-
         return tokenized
     return collate_fn_sft
 
-# TODO no longer SFT dataset anymore
 class SftDataset(Dataset):
-    def __init__(self, prompts, responses, raw_rewards=None, advantages=None):
+    def __init__(self, prompts, responses):
         self.prompts = prompts
         self.responses = responses
-        self.raw_rewards = raw_rewards
-        self.advantages = advantages
 
     def __len__(self):
         return len(self.prompts)
@@ -82,13 +72,96 @@ class SftDataset(Dataset):
             "prompt": self.prompts[idx],
             "response": self.responses[idx],
         }
-        if self.raw_rewards != None:
-            ret = ret | {"raw_rewards": self.raw_rewards[idx]}
-        if self.advantages != None:
-            ret = ret | {"advantages": self.advantages[idx]}
         return ret
 
-def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer: PreTrainedTokenizer) -> dict[str, torch.Tensor]:
+def collate_fn_rl(batch):
+    prompt_token_ids = [item["prompt_token_ids"] for item in batch] # (batch_size, various_len)
+    response_token_ids = [item["response_token_ids"] for item in batch] # (batch_size, various_len)
+    old_log_probs = [item["old_log_probs"] for item in batch] # (batch_size, various_len) (same shape to response_token_ids)
+    raw_rewards = [item["raw_rewards"] for item in batch] # (batch_size, )
+    advantages = [item["advantages"] for item in batch] # (batch_size, )
+
+    ret = pad_and_assemble(
+        prompt_token_ids,
+        response_token_ids,
+        old_log_probs=old_log_probs,
+    )
+
+    ret = ret | {
+        "raw_rewards": torch.tensor(raw_rewards).unsqueeze(-1), # make it (batch_size, 1) for broadcast
+        "advantages": torch.tensor(advantages).unsqueeze(-1),
+    }
+    return ret
+
+class RlDataset(Dataset):
+    def __init__(self, 
+        prompt_token_ids, 
+        response_token_ids, 
+        old_log_probs,
+        raw_rewards,
+        advantages
+    ):
+        self.prompt_token_ids = prompt_token_ids
+        self.response_token_ids = response_token_ids
+        self.old_log_probs = old_log_probs
+        self.raw_rewards = raw_rewards
+        self.advantages = advantages
+
+    def __len__(self):
+        return len(self.prompt_token_ids)
+
+    def __getitem__(self, idx):
+        ret = {
+            "prompt_token_ids": self.prompt_token_ids[idx],
+            "response_token_ids": self.response_token_ids[idx],
+            "old_log_probs": self.old_log_probs[idx],
+            "raw_rewards": self.raw_rewards[idx],
+            "advantages": self.advantages[idx],
+        }
+        return ret
+
+def pad_and_assemble(
+    prompt_input_ids: list[list[int]],
+    output_input_ids: list[list[int]],
+    old_log_probs: list[list[float]] = None, # used in rl
+    pad_token_id: int = 0,
+) -> dict[str, torch.Tensor]:
+    input_ids = [a + b for a, b in zip(prompt_input_ids, output_input_ids)]
+    max_length = max([len(x) for x in input_ids])
+    input_ids_padded = []
+    for input_id in input_ids:
+        input_id_padded = input_id + [pad_token_id] * (max_length - len(input_id))
+        input_ids_padded.append(input_id_padded)
+    input_ids_padded = torch.tensor(input_ids_padded)
+    
+    response_masks = torch.zeros_like(input_ids_padded, dtype=torch.bool)
+    for i in range(len(response_masks)):
+        p_len = len(prompt_input_ids[i])
+        o_len = len(output_input_ids[i])
+        response_masks[i, p_len:p_len+o_len] = True
+    
+    ret = {
+        "input_ids": input_ids_padded[:, :-1],
+        "labels": input_ids_padded[:, 1:],
+        "response_mask": response_masks[:, 1:]
+    }
+    
+    if old_log_probs:
+        pad_log_probs = torch.zeros_like(input_ids_padded, dtype=torch.float)
+        for i in range(len(pad_log_probs)):
+            p_len = len(prompt_input_ids[i])
+            o_len = len(output_input_ids[i])
+            pad_log_probs[i, p_len:p_len+o_len] = torch.tensor(old_log_probs[i])
+        ret = ret | {"old_log_probs": pad_log_probs[:, :-1]}
+
+    return ret
+    
+
+def tokenize_prompt_and_output(
+    prompt_strs: list[str], 
+    output_strs: list[str], 
+    tokenizer: PreTrainedTokenizer,
+) -> dict[str, torch.Tensor]:
     """
     Tokenize the prompt and output strings, and construct a mask that is 1 for the response tokens and 0 for other tokens (prompt or padding).
     Args:
@@ -112,23 +185,11 @@ def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], t
     """
     prompt_input_ids = tokenizer(prompt_strs)["input_ids"]
     output_input_ids = tokenizer(output_strs)["input_ids"]
-    input_ids = [a + b for a, b in zip(prompt_input_ids, output_input_ids)]
-    max_length = max([len(x) for x in input_ids])
-    input_ids_padded = []
-    for input_id in input_ids:
-        input_id_padded = input_id + [tokenizer.pad_token_id] * (max_length - len(input_id))
-        input_ids_padded.append(input_id_padded)
-    input_ids_padded = torch.tensor(input_ids_padded)
-    
-    response_masks = torch.zeros_like(input_ids_padded, dtype=torch.bool)
-    for i in range(len(response_masks)):
-        p_len = len(prompt_input_ids[i])
-        o_len = len(output_input_ids[i])
-        response_masks[i, p_len:p_len+o_len] = True
-        
-    
-    return {
-        "input_ids": input_ids_padded[:, :-1],
-        "labels": input_ids_padded[:, 1:],
-        "response_mask": response_masks[:, 1:]
-    }
+
+    ret = pad_and_assemble(
+        prompt_input_ids,
+        output_input_ids,
+        pad_token_id=tokenizer.pad_token_id
+    )
+
+    return ret
