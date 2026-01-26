@@ -16,6 +16,7 @@ dependencies = [
     "transformers>=4.55.0",
     "vllm==0.7.2; sys_platform == 'linux'",
     "wandb>=0.23.1",
+    "apple-bolt-bastion-submission>=1.4.2",
 ]
 
 [tool.setuptools.packages.find]

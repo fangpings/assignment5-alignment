@@ -78,7 +78,7 @@ def main():
     
     llm = init_vllm(args.model_name, vllm_device)
 
-    train_prompts, train_responses = load_gsm8k(args.prompt_path, split="train", answer_only=True) # RL does not need the CoT from training data, only the final answer
+    train_prompts, train_responses = load_gsm8k(args.prompt_path, split="train", answer_only=False)
     dataset = SftDataset(train_prompts, train_responses)
     dataloader = DataLoader(
         dataset,
@@ -88,7 +88,7 @@ def main():
         num_workers=4
     )
 
-    eval_prompts, eval_responses = load_gsm8k(args.prompt_path, split="eval", answer_only=True)
+    eval_prompts, eval_responses = load_gsm8k(args.prompt_path, split="test", answer_only=True)
 
     wandb.login(host=os.environ["WANDB_ENDPOINT"])
     with wandb.init(
@@ -149,6 +149,13 @@ def main():
             with open(os.path.join(path, "eval.jsonl"), "w") as f:
                 for output in outputs:
                     f.write(json.dumps(output) + "\n")
+
+        # Save final model and tokenizer for vLLM
+        final_model_path = os.path.join(args.output_dir, "model")
+        os.makedirs(final_model_path, exist_ok=True)
+        model.save_pretrained(final_model_path)
+        tokenizer.save_pretrained(final_model_path)
+
 
 if __name__ == "__main__":
     main()

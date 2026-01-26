@@ -46,7 +46,7 @@ def main():
     )
     llm = init_vllm(grpo_config.model_name, rollout_device)
 
-    train_prompts, train_responses = load_gsm8k(grpo_config.prompt_path, split="train", answer_only=False)
+    train_prompts, train_responses = load_gsm8k(grpo_config.prompt_path, split="train", answer_only=True)
     rollout_dataset = SftDataset(train_prompts, train_responses)
     rollout_dataloader = DataLoader(
         rollout_dataset,
@@ -63,7 +63,7 @@ def main():
         project="alignment-test",
         name="grpo-"+str(uuid.uuid1())[:6],
         config=asdict(grpo_config),
-        mode="disabled"
+        # mode="disabled"
     ) as run:
         run.define_metric("train/*", step_metric="train_step")
         run.define_metric("eval/*", step_metric="global_step")
@@ -139,7 +139,6 @@ def main():
                         batch_old_log_probs,
                         grpo_config.clip_range
                     )
-                    print(loss)
 
                     if (idx + 1) % grpo_config.gradient_accumulation_steps == 0:
                         optimizer.step()
